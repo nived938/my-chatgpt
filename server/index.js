@@ -1,5 +1,6 @@
 import express from 'express';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { pipeline, env } from '@huggingface/transformers';
 
@@ -9,6 +10,7 @@ env.cacheDir = path.resolve(process.env.HF_HOME || './.cache', 'transformers');
 
 const MODEL = 'onnx-community/Qwen2.5-0.5B-Instruct';
 let generatorPromise;
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 
@@ -25,7 +27,7 @@ function clean(text = '') { return String(text).replace(/\s+/g, ' ').trim(); }
 async function getGenerator() {
   if (!generatorPromise) {
     generatorPromise = pipeline('text-generation', MODEL, {
-      device: 'wasm',
+      device: 'cpu',
       dtype: 'q4'
     }).catch(error => {
       generatorPromise = null;
@@ -46,17 +48,15 @@ function extractAnswer(output) {
   return '';
 }
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, localAI: true, model: MODEL, tools: ['chat', 'search', 'open', 'calculator'] }));
+app.get('/api/health', (_req, res) => res.json({ ok: true, localAI: true, model: MODEL, device: 'cpu', tools: ['chat', 'search', 'open', 'calculator'] }));
 
 app.post('/api/chat', async (req, res) => {
   const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
   if (!messages.length) return res.status(400).json({ error: 'messages are required' });
-
   const safeMessages = messages.slice(-14).map(m => ({
     role: ['system', 'user', 'assistant'].includes(m.role) ? m.role : 'user',
     content: String(m.content || '').slice(0, 12000)
   }));
-
   try {
     console.log(`Generating response for ${safeMessages.length} messages...`);
     const generator = await getGenerator();
@@ -114,10 +114,6 @@ app.get('/api/calc', (req, res) => {
     res.json({ expression, result: value });
   } catch { res.status(400).json({ error: 'Could not calculate expression' }); }
 });
-
-// The backend is API-only. The frontend is deployed separately on Render,
-// so this server must not try to serve ../dist/index.html.
-app.use((_req, res) => res.status(404).json({ error: 'API route not found' }));
 
 const port = process.env.PORT || 3001;
 app.listen(port, () => console.log(`My ChatGPT backend running on ${port}`));
