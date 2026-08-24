@@ -1,8 +1,25 @@
 services:
   - type: web
-    name: my-chatgpt
+    name: my-chatgpt-backend
     runtime: node
-    buildCommand: npm install && npm run build
-    startCommand: npm start
+    buildCommand: npm install
+    startCommand: node server/index.js
     plan: free
     healthCheckPath: /api/health
+    envVars:
+      - key: FRONTEND_URL
+        value: "*"
+      - key: HF_HOME
+        value: "/opt/render/project/src/.cache"
+
+  - type: web
+    name: my-chatgpt-frontend
+    runtime: static
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./dist
+    envVars:
+      - key: VITE_API_URL
+        fromService:
+          type: web
+          name: my-chatgpt-backend
+          property: host
