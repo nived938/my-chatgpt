@@ -4,7 +4,8 @@ import { Bot, ChevronDown, Copy, Globe, Menu, MessageSquarePlus, Moon, Paperclip
 import './styles.css';
 
 const STORAGE = 'my-chatgpt-chats-v2';
-const API_BASE = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
+const RAW_API = import.meta.env.VITE_API_URL || '';
+const API_BASE = RAW_API ? (/^https?:\/\//i.test(RAW_API) ? RAW_API : `https://${RAW_API}`).replace(/\/$/, '') : '';
 const api = path => `${API_BASE}${path}`;
 
 function uid() { return crypto.randomUUID(); }
