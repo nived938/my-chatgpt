@@ -2,14 +2,59 @@ import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { pipeline, env } from '@huggingface/transformers';
 
+env.allowLocalModels = false;
+env.useBrowserCache = false;
+env.cacheDir = path.resolve(process.env.HF_HOME || './.cache', 'transformers');
+
+const MODEL = 'onnx-community/Qwen2.5-0.5B-Instruct-ONNX';
+let generatorPromise;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', process.env.FRONTEND_URL || '*');
+  res.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
 function clean(text = '') { return text.replace(/\s+/g, ' ').trim(); }
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, localAI: true, tools: ['search', 'open', 'calculator'] }));
+async function getGenerator() {
+  if (!generatorPromise) {
+    generatorPromise = pipeline('text-generation', MODEL, { device: 'wasm', dtype: 'q4' });
+  }
+  return generatorPromise;
+}
+
+function extractAnswer(output) {
+  const generated = output?.[0]?.generated_text;
+  if (Array.isArray(generated)) return generated.at(-1)?.content || '';
+  return String(generated || '').replace(/^assistant\s*/i, '').trim();
+}
+
+app.get('/api/health', (_req, res) => res.json({ ok: true, localAI: true, model: MODEL, tools: ['chat', 'search', 'open', 'calculator'] }));
+
+app.post('/api/chat', async (req, res) => {
+  const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
+  if (!messages.length) return res.status(400).json({ error: 'messages are required' });
+  const safeMessages = messages.slice(-14).map(m => ({
+    role: ['system', 'user', 'assistant'].includes(m.role) ? m.role : 'user',
+    content: String(m.content || '').slice(0, 12000)
+  }));
+  try {
+    const generator = await getGenerator();
+    const output = await generator(safeMessages, { max_new_tokens: 900, temperature: 0.65, top_p: 0.9, repetition_penalty: 1.08, do_sample: true });
+    res.json({ answer: extractAnswer(output) || 'I could not generate a response. Please try again.' });
+  } catch (e) {
+    console.error('LOCAL AI ERROR:', e);
+    res.status(500).json({ error: 'Local AI generation failed', detail: e?.message || String(e) });
+  }
+});
 
 app.get('/api/search', async (req, res) => {
   const q = String(req.query.q || '').trim();
@@ -55,4 +100,4 @@ app.use(express.static(dist));
 app.use((_req, res) => res.sendFile(path.join(dist, 'index.html')));
 
 const port = process.env.PORT || 3001;
-app.listen(port, () => console.log(`My ChatGPT server running on ${port}`));
+app.listen(port, () => console.log(`My ChatGPT backend running on ${port}`));
