@@ -9,14 +9,15 @@ env.cacheDir = process.env.HF_HOME || './.cache/transformers';
 const MODEL = 'onnx-community/SmolLM2-135M-Instruct-ONNX-MHA';
 const DEVICE = 'cpu';
 const DTYPE = 'q4';
-let generatorPromise;
+let generatorPromise = null;
 
 const app = express();
 app.disable('x-powered-by');
 app.use(express.json({ limit: '2mb' }));
-
 app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', process.env.FRONTEND_URL || '*');
+  const origin = req.headers.origin;
+  const allowed = process.env.FRONTEND_URL || '*';
+  res.setHeader('Access-Control-Allow-Origin', allowed === '*' ? '*' : origin === allowed ? origin : allowed);
   res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -29,10 +30,7 @@ function clean(text = '') { return String(text).replace(/\s+/g, ' ').trim(); }
 async function getGenerator() {
   if (!generatorPromise) {
     console.log(`Loading local model: ${MODEL} (${DEVICE}/${DTYPE})`);
-    generatorPromise = pipeline('text-generation', MODEL, {
-      device: DEVICE,
-      dtype: DTYPE
-    }).catch(error => {
+    generatorPromise = pipeline('text-generation', MODEL, { device: DEVICE, dtype: DTYPE }).catch(error => {
       generatorPromise = null;
       console.error('MODEL LOAD ERROR:', error);
       throw error;
@@ -41,45 +39,38 @@ async function getGenerator() {
   return generatorPromise;
 }
 
-function extractAnswer(output) {
-  const generated = output?.[0]?.generated_text;
-  if (Array.isArray(generated)) {
-    const last = generated[generated.length - 1];
-    if (typeof last === 'string') return last.trim();
-    if (last && typeof last.content === 'string') return last.content.trim();
+function makePrompt(messages) {
+  const system = messages.find(m => m.role === 'system')?.content || 'You are a helpful assistant.';
+  const conversation = messages.filter(m => m.role !== 'system').slice(-8);
+  let prompt = `<|im_start|>system\n${system}<|im_end|>\n`;
+  for (const message of conversation) {
+    const role = message.role === 'assistant' ? 'assistant' : 'user';
+    prompt += `<|im_start|>${role}\n${message.content}<|im_end|>\n`;
   }
-  if (typeof generated === 'string') return generated.replace(/^assistant\s*/i, '').trim();
-  return '';
+  return `${prompt}<|im_start|>assistant\n`;
 }
 
-app.get('/api/health', (_req, res) => res.json({
-  ok: true,
-  localAI: true,
-  model: MODEL,
-  device: DEVICE,
-  dtype: DTYPE,
-  tools: ['chat', 'search', 'open', 'calculator']
-}));
+function extractAnswer(output) {
+  const generated = output?.[0]?.generated_text;
+  if (typeof generated !== 'string') return '';
+  return generated.split('<|im_start|>assistant').pop().split('<|im_end|>')[0].trim();
+}
+
+app.get('/api/health', (_req, res) => res.json({ ok: true, localAI: true, model: MODEL, device: DEVICE, dtype: DTYPE, tools: ['chat', 'search', 'open', 'calculator'] }));
 
 app.post('/api/chat', async (req, res) => {
   const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
   if (!messages.length) return res.status(400).json({ error: 'messages are required' });
-  const safeMessages = messages.slice(-10).map(m => ({
-    role: ['system', 'user', 'assistant'].includes(m.role) ? m.role : 'user',
-    content: String(m.content || '').slice(0, 8000)
-  }));
+  const safeMessages = messages.slice(-10).map(m => ({ role: ['system', 'user', 'assistant'].includes(m.role) ? m.role : 'user', content: String(m.content || '').slice(0, 8000) }));
   try {
     console.log(`Generating response for ${safeMessages.length} messages...`);
     const generator = await getGenerator();
-    const output = await generator(safeMessages, {
-      max_new_tokens: 256,
-      temperature: 0.7,
-      top_p: 0.9,
-      repetition_penalty: 1.05,
-      do_sample: true
-    });
+    const prompt = makePrompt(safeMessages);
+    console.log('Generating local response...');
+    const output = await generator(prompt, { max_new_tokens: 160, temperature: 0.7, top_p: 0.9, repetition_penalty: 1.05, do_sample: true, return_full_text: true });
     const answer = extractAnswer(output);
     if (!answer) throw new Error('The local model returned an empty response');
+    console.log('Local response generated successfully');
     res.json({ answer });
   } catch (error) {
     console.error('LOCAL AI ERROR:', error);
@@ -127,6 +118,5 @@ app.get('/api/calc', (req, res) => {
 });
 
 app.use('/api', (_req, res) => res.status(404).json({ error: 'API route not found' }));
-
 const port = process.env.PORT || 3001;
 app.listen(port, '0.0.0.0', () => console.log(`My ChatGPT backend running on ${port}`));
