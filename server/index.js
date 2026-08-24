@@ -1,6 +1,5 @@
 import express from 'express';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { pipeline, env } from '@huggingface/transformers';
 
@@ -8,10 +7,8 @@ env.allowLocalModels = false;
 env.useBrowserCache = false;
 env.cacheDir = path.resolve(process.env.HF_HOME || './.cache', 'transformers');
 
-// Official Transformers.js ONNX model repository.
 const MODEL = 'onnx-community/Qwen2.5-0.5B-Instruct';
 let generatorPromise;
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 
@@ -75,10 +72,7 @@ app.post('/api/chat', async (req, res) => {
     res.json({ answer: String(answer) });
   } catch (e) {
     console.error('LOCAL AI ERROR:', e);
-    res.status(500).json({
-      error: 'Local AI generation failed',
-      detail: e?.message || String(e)
-    });
+    res.status(500).json({ error: 'Local AI generation failed', detail: e?.message || String(e) });
   }
 });
 
@@ -121,9 +115,9 @@ app.get('/api/calc', (req, res) => {
   } catch { res.status(400).json({ error: 'Could not calculate expression' }); }
 });
 
-const dist = path.resolve(__dirname, '../dist');
-app.use(express.static(dist));
-app.use((_req, res) => res.sendFile(path.join(dist, 'index.html')));
+// The backend is API-only. The frontend is deployed separately on Render,
+// so this server must not try to serve ../dist/index.html.
+app.use((_req, res) => res.status(404).json({ error: 'API route not found' }));
 
 const port = process.env.PORT || 3001;
 app.listen(port, () => console.log(`My ChatGPT backend running on ${port}`));
