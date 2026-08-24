@@ -1,23 +1,25 @@
 import express from 'express';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { pipeline, env } from '@huggingface/transformers';
 
 env.allowLocalModels = false;
 env.useBrowserCache = false;
-env.cacheDir = path.resolve(process.env.HF_HOME || './.cache', 'transformers');
+env.cacheDir = process.env.HF_HOME || './.cache/transformers';
 
-const MODEL = 'onnx-community/Qwen2.5-0.5B-Instruct';
+const MODEL = 'onnx-community/SmolLM2-135M-Instruct-ONNX-MHA';
+const DEVICE = 'cpu';
+const DTYPE = 'q4';
 let generatorPromise;
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
 const app = express();
+app.disable('x-powered-by');
 app.use(express.json({ limit: '2mb' }));
 
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', process.env.FRONTEND_URL || '*');
-  res.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Origin', process.env.FRONTEND_URL || '*');
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
@@ -26,11 +28,13 @@ function clean(text = '') { return String(text).replace(/\s+/g, ' ').trim(); }
 
 async function getGenerator() {
   if (!generatorPromise) {
+    console.log(`Loading local model: ${MODEL} (${DEVICE}/${DTYPE})`);
     generatorPromise = pipeline('text-generation', MODEL, {
-      device: 'cpu',
-      dtype: 'q4'
+      device: DEVICE,
+      dtype: DTYPE
     }).catch(error => {
       generatorPromise = null;
+      console.error('MODEL LOAD ERROR:', error);
       throw error;
     });
   }
@@ -48,31 +52,38 @@ function extractAnswer(output) {
   return '';
 }
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, localAI: true, model: MODEL, device: 'cpu', tools: ['chat', 'search', 'open', 'calculator'] }));
+app.get('/api/health', (_req, res) => res.json({
+  ok: true,
+  localAI: true,
+  model: MODEL,
+  device: DEVICE,
+  dtype: DTYPE,
+  tools: ['chat', 'search', 'open', 'calculator']
+}));
 
 app.post('/api/chat', async (req, res) => {
   const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
   if (!messages.length) return res.status(400).json({ error: 'messages are required' });
-  const safeMessages = messages.slice(-14).map(m => ({
+  const safeMessages = messages.slice(-10).map(m => ({
     role: ['system', 'user', 'assistant'].includes(m.role) ? m.role : 'user',
-    content: String(m.content || '').slice(0, 12000)
+    content: String(m.content || '').slice(0, 8000)
   }));
   try {
     console.log(`Generating response for ${safeMessages.length} messages...`);
     const generator = await getGenerator();
     const output = await generator(safeMessages, {
-      max_new_tokens: 512,
-      temperature: 0.65,
+      max_new_tokens: 256,
+      temperature: 0.7,
       top_p: 0.9,
-      repetition_penalty: 1.08,
+      repetition_penalty: 1.05,
       do_sample: true
     });
     const answer = extractAnswer(output);
     if (!answer) throw new Error('The local model returned an empty response');
-    res.json({ answer: String(answer) });
-  } catch (e) {
-    console.error('LOCAL AI ERROR:', e);
-    res.status(500).json({ error: 'Local AI generation failed', detail: e?.message || String(e) });
+    res.json({ answer });
+  } catch (error) {
+    console.error('LOCAL AI ERROR:', error);
+    res.status(500).json({ error: 'Local AI generation failed', detail: error?.message || String(error) });
   }
 });
 
@@ -90,7 +101,7 @@ app.get('/api/search', async (req, res) => {
       return { title: clean(a?.textContent), url: a?.href || '', snippet: clean(snippet?.textContent) };
     }).filter(x => x.title && x.url);
     res.json({ query: q, results });
-  } catch (e) { res.status(502).json({ error: 'Web search failed', detail: e.message }); }
+  } catch (error) { res.status(502).json({ error: 'Web search failed', detail: error.message }); }
 });
 
 app.get('/api/open', async (req, res) => {
@@ -101,7 +112,7 @@ app.get('/api/open', async (req, res) => {
     const dom = new JSDOM(await r.text(), { url: r.url });
     dom.window.document.querySelectorAll('script,style,noscript,svg').forEach(n => n.remove());
     res.json({ url: r.url, title: clean(dom.window.document.title), text: clean(dom.window.document.body?.textContent || '').slice(0, 30000) });
-  } catch (e) { res.status(502).json({ error: 'Could not open page', detail: e.message }); }
+  } catch (error) { res.status(502).json({ error: 'Could not open page', detail: error.message }); }
 });
 
 app.get('/api/calc', (req, res) => {
@@ -115,5 +126,7 @@ app.get('/api/calc', (req, res) => {
   } catch { res.status(400).json({ error: 'Could not calculate expression' }); }
 });
 
+app.use('/api', (_req, res) => res.status(404).json({ error: 'API route not found' }));
+
 const port = process.env.PORT || 3001;
-app.listen(port, () => console.log(`My ChatGPT backend running on ${port}`));
+app.listen(port, '0.0.0.0', () => console.log(`My ChatGPT backend running on ${port}`));
