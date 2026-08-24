@@ -8,7 +8,8 @@ env.allowLocalModels = false;
 env.useBrowserCache = false;
 env.cacheDir = path.resolve(process.env.HF_HOME || './.cache', 'transformers');
 
-const MODEL = 'onnx-community/Qwen2.5-0.5B-Instruct-ONNX';
+// Official Transformers.js ONNX model repository.
+const MODEL = 'onnx-community/Qwen2.5-0.5B-Instruct';
 let generatorPromise;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -22,19 +23,30 @@ app.use((req, res, next) => {
   next();
 });
 
-function clean(text = '') { return text.replace(/\s+/g, ' ').trim(); }
+function clean(text = '') { return String(text).replace(/\s+/g, ' ').trim(); }
 
 async function getGenerator() {
   if (!generatorPromise) {
-    generatorPromise = pipeline('text-generation', MODEL, { device: 'wasm', dtype: 'q4' });
+    generatorPromise = pipeline('text-generation', MODEL, {
+      device: 'wasm',
+      dtype: 'q4'
+    }).catch(error => {
+      generatorPromise = null;
+      throw error;
+    });
   }
   return generatorPromise;
 }
 
 function extractAnswer(output) {
   const generated = output?.[0]?.generated_text;
-  if (Array.isArray(generated)) return generated.at(-1)?.content || '';
-  return String(generated || '').replace(/^assistant\s*/i, '').trim();
+  if (Array.isArray(generated)) {
+    const last = generated[generated.length - 1];
+    if (typeof last === 'string') return last.trim();
+    if (last && typeof last.content === 'string') return last.content.trim();
+  }
+  if (typeof generated === 'string') return generated.replace(/^assistant\s*/i, '').trim();
+  return '';
 }
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, localAI: true, model: MODEL, tools: ['chat', 'search', 'open', 'calculator'] }));
@@ -42,17 +54,31 @@ app.get('/api/health', (_req, res) => res.json({ ok: true, localAI: true, model:
 app.post('/api/chat', async (req, res) => {
   const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
   if (!messages.length) return res.status(400).json({ error: 'messages are required' });
+
   const safeMessages = messages.slice(-14).map(m => ({
     role: ['system', 'user', 'assistant'].includes(m.role) ? m.role : 'user',
     content: String(m.content || '').slice(0, 12000)
   }));
+
   try {
+    console.log(`Generating response for ${safeMessages.length} messages...`);
     const generator = await getGenerator();
-    const output = await generator(safeMessages, { max_new_tokens: 900, temperature: 0.65, top_p: 0.9, repetition_penalty: 1.08, do_sample: true });
-    res.json({ answer: extractAnswer(output) || 'I could not generate a response. Please try again.' });
+    const output = await generator(safeMessages, {
+      max_new_tokens: 512,
+      temperature: 0.65,
+      top_p: 0.9,
+      repetition_penalty: 1.08,
+      do_sample: true
+    });
+    const answer = extractAnswer(output);
+    if (!answer) throw new Error('The local model returned an empty response');
+    res.json({ answer: String(answer) });
   } catch (e) {
     console.error('LOCAL AI ERROR:', e);
-    res.status(500).json({ error: 'Local AI generation failed', detail: e?.message || String(e) });
+    res.status(500).json({
+      error: 'Local AI generation failed',
+      detail: e?.message || String(e)
+    });
   }
 });
 
